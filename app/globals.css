@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --font-noto: 'Noto Sans TC', sans-serif;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-noto), 'Noto Sans TC', sans-serif;
+  color: #1a2a4a;
+  background-color: #ffffff;
+}
+
+/* ── Hero 白底金色點狀背景（對應名片風格）── */
+.blueprint-bg {
+  background-color: #ffffff;
+  background-image:
+    radial-gradient(circle, rgba(201,162,39,0.25) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* ── Gold 漸層文字 ── */
+.text-gradient-gold {
+  background: linear-gradient(135deg, #c9a227 0%, #e8c84a 50%, #c9a227 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── 金色分隔線 ── */
+.gold-divider {
+  width: 60px;
+  height: 3px;
+  background: linear-gradient(90deg, #c9a227, #e8c84a);
+  border-radius: 2px;
+}
+
+/* ── 表單輸入框樣式 ── */
+.form-input {
+  @apply w-full px-4 py-3 border border-brand-gray-mid rounded-md
+    bg-white text-brand-navy text-sm
+    focus:outline-none focus:ring-2 focus:ring-brand-gold focus:border-transparent
+    transition-all duration-200;
+}
+
+.form-select {
+  @apply w-full px-4 py-3 border border-brand-gray-mid rounded-md
+    bg-white text-brand-navy text-sm appearance-none cursor-pointer
+    focus:outline-none focus:ring-2 focus:ring-brand-gold focus:border-transparent
+    transition-all duration-200;
+}
+
+.form-label {
+  @apply block text-sm font-medium text-brand-blue mb-1.5;
+}
+
+.form-error {
+  @apply text-red-500 text-xs mt-1;
+}
+
+/* ── 服務卡片 hover ── */
+.service-card {
+  @apply bg-white rounded-xl p-6 border border-brand-gray-mid
+    hover:border-brand-gold hover:shadow-lg transition-all duration-300;
+}
+
+/* ── CTA 按鈕 ── */
+.btn-gold {
+  @apply inline-flex items-center justify-center gap-2
+    bg-brand-gold hover:bg-brand-gold-light
+    text-brand-dark font-semibold
+    px-6 py-3 rounded-md
+    transition-all duration-200
+    shadow-md hover:shadow-lg;
+}
+
+.btn-outline-white {
+  @apply inline-flex items-center justify-center gap-2
+    border-2 border-brand-dark text-brand-dark
+    hover:bg-brand-dark hover:text-white
+    font-semibold px-6 py-3 rounded-md
+    transition-all duration-200;
+}
+
+/* ── FAQ Accordion ── */
+.faq-item summary {
+  list-style: none;
+}
+.faq-item summary::-webkit-details-marker {
+  display: none;
+}
+
+/* ── Section 標題統一樣式 ── */
+.section-title {
+  @apply text-3xl md:text-4xl font-bold text-brand-dark leading-tight;
+}
+
+.section-subtitle {
+  @apply text-brand-muted text-base mt-3 max-w-2xl;
+}
