@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#111418">
+<title>空中滑鼠</title>
+<style>
+  :root {
+    --bg: #111418; --panel: #1b2027; --line: #2c333d; --text: #e8ecf1; --muted: #8b95a3;
+    --accent: #4f9cf9; --left: #1d2a3a; --right: #2a1d33; --ok: #3ecf8e; --warn: #f5a524; --err: #f25f5c;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Noto Sans TC", "PingFang TC", sans-serif;
+    overscroll-behavior: none; touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; overflow: hidden; }
+  #app { display: flex; flex-direction: column; height: 100%; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  #status { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 14px; min-width: 0; }
+  #dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err); flex: none; }
+  #dot.ok { background: var(--ok); } #dot.warn { background: var(--warn); }
+  #statusText { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  header button { background: #262d36; color: var(--text); border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 12px; font-size: 15px; }
+  header button.on { background: var(--warn); color: #111; border-color: var(--warn); }
+  #pad { flex: 1; display: flex; position: relative; }
+  .half { flex: 1; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px;
+    font-size: 22px; color: var(--muted); transition: filter .08s; }
+  .half small { font-size: 12px; opacity: .8; }
+  #leftHalf { background: var(--left); border-right: 1px solid var(--line); }
+  #rightHalf { background: var(--right); }
+  .half.flash { filter: brightness(1.8); }
+  #pad.paused .half { opacity: .45; }
+  #hint { position: absolute; left: 0; right: 0; bottom: 10px; text-align: center; font-size: 12px; color: var(--muted); pointer-events: none; }
+  #debug { position: absolute; left: 8px; top: 8px; font: 11px ui-monospace, monospace; color: var(--muted); pointer-events: none; white-space: pre; }
+
+  .overlay { position: fixed; inset: 0; background: rgba(8,10,13,.92); display: flex; align-items: center; justify-content: center; z-index: 10; padding: 20px; }
+  .overlay[hidden] { display: none; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 20px; width: 100%; max-width: 420px; max-height: 100%; overflow-y: auto; touch-action: pan-y; }
+  .card h2 { margin: 0 0 10px; font-size: 20px; }
+  .card p { color: var(--muted); font-size: 14px; line-height: 1.6; margin: 6px 0; }
+  .big { width: 100%; padding: 14px; font-size: 18px; border-radius: 12px; border: 0; background: var(--accent); color: #fff; margin-top: 12px; }
+  .row { margin: 14px 0; }
+  .row label { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 6px; }
+  .row label span:last-child { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .row input[type=range] { width: 100%; accent-color: var(--accent); }
+  .row .desc { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .check { display: flex; align-items: center; gap: 10px; font-size: 14px; margin: 10px 0; }
+  .check input { width: 20px; height: 20px; accent-color: var(--accent); }
+  select { width: 100%; padding: 8px; border-radius: 8px; background: #262d36; color: var(--text); border: 1px solid var(--line); font-size: 14px; }
+  .btns { display: flex; gap: 8px; }
+  .btns button { flex: 1; }
+  .secondary { background: #262d36 !important; border: 1px solid var(--line) !important; }
+  #calibMsg { font-size: 28px; text-align: center; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div id="status"><span id="dot"></span><span id="statusText">未連線</span></div>
+    <button id="pauseBtn">⏸ 暫停</button>
+    <button id="calibBtn">🎯 校正</button>
+    <button id="settingsBtn">⚙</button>
+  </header>
+  <div id="pad">
+    <div class="half" id="leftHalf">左鍵<small>點一下｜長按可拖曳</small></div>
+    <div class="half" id="rightHalf">右鍵<small>點一下</small></div>
+    <div id="debug"></div>
+    <div id="hint">轉動手機移動游標 · 雙指滑動捲動</div>
+  </div>
+</div>
+
+<!-- 開始畫面 -->
+<div class="overlay" id="startOverlay">
+  <div class="card">
+    <h2>📱 手機空中滑鼠</h2>
+    <p>把手機<b>螢幕朝上平放在手上</b>、上緣指向電腦螢幕，左右轉動 = 游標左右，上下翹 = 游標上下。</p>
+    <p>點左半邊 = 左鍵、右半邊 = 右鍵、雙指滑動 = 捲動。左半邊長按可拖曳。</p>
+    <p>游標會飄的話，把手機放在桌上按「🎯 校正」。</p>
+    <button class="big" id="startBtn">開始</button>
+    <p id="startErr" style="color:var(--err)"></p>
+  </div>
+</div>
+
+<!-- 校正畫面 -->
+<div class="overlay" id="calibOverlay" hidden>
+  <div class="card">
+    <h2>🎯 陀螺儀校正</h2>
+    <p>請把手機平放在桌上，保持不動…</p>
+    <div id="calibMsg">3</div>
+  </div>
+</div>
+
+<!-- 設定 -->
+<div class="overlay" id="settingsOverlay" hidden>
+  <div class="card">
+    <h2>⚙ 設定</h2>
+    <div class="row">
+      <label><span>靈敏度</span><span id="v_sens"></span></label>
+      <input type="range" id="sens" min="2" max="60" step="1">
+      <div class="desc">每轉 1 度移動的像素數</div>
+    </div>
+    <div class="row">
+      <label><span>加速度</span><span id="v_accel"></span></label>
+      <input type="range" id="accel" min="0" max="100" step="5">
+      <div class="desc">越高：慢轉更精準、快轉移動更遠</div>
+    </div>
+    <div class="row">
+      <label><span>防抖：平滑</span><span id="v_smooth"></span></label>
+      <input type="range" id="smooth" min="0" max="100" step="5">
+      <div class="desc">越高越穩，但反應稍慢</div>
+    </div>
+    <div class="row">
+      <label><span>防抖：死區</span><span id="v_dead"></span></label>
+      <input type="range" id="dead" min="0" max="15" step="0.5">
+      <div class="desc">低於此轉速（度/秒）的晃動會被忽略</div>
+    </div>
+    <div class="row">
+      <label><span>點擊防抖時間</span><span id="v_clickFreeze"></span></label>
+      <input type="range" id="clickFreeze" min="0" max="400" step="20">
+      <div class="desc">手指按下時與放開後凍結游標，避免點擊時游標偏移</div>
+    </div>
+    <div class="row">
+      <label><span>捲動速度</span><span id="v_scroll"></span></label>
+      <input type="range" id="scroll" min="1" max="30" step="1">
+    </div>
+    <div class="row">
+      <label><span>握持方式</span><span></span></label>
+      <select id="mode">
+        <option value="flat">平放（螢幕朝上，上緣指向電腦）</option>
+        <option value="upright">直立（螢幕朝向自己，背面指向電腦）</option>
+      </select>
+    </div>
+    <label class="check"><input type="checkbox" id="invX"> 反轉左右</label>
+    <label class="check"><input type="checkbox" id="invY"> 反轉上下</label>
+    <label class="check"><input type="checkbox" id="invScroll"> 反轉捲動方向</label>
+    <label class="check"><input type="checkbox" id="showDebug"> 顯示感測器數值</label>
+    <div class="btns">
+      <button class="big secondary" id="resetBtn">恢復預設</button>
+      <button class="big" id="closeSettings">完成</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+
+  // ---------------- 設定 ----------------
+  const DEFAULTS = { sens: 18, accel: 40, smooth: 45, dead: 3, clickFreeze: 160, scroll: 8,
+                     mode: 'flat', invX: false, invY: false, invScroll: false, showDebug: false };
+  const KEY = 'airmouse.settings.v1';
+  let S = { ...DEFAULTS };
+  try { Object.assign(S, JSON.parse(localStorage.getItem(KEY) || '{}')); } catch (e) {}
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+
+  const fmt = {
+    sens: v => v + ' px/°', accel: v => v + '%', smooth: v => v + '%', dead: v => v + ' °/s',
+    clickFreeze: v => v + ' ms', scroll: v => v,
+  };
+  function bindSettings() {
+    for (const k of Object.keys(DEFAULTS)) {
+      const el = $(k); if (!el) continue;
+      if (el.type === 'checkbox') el.checked = !!S[k]; else el.value = S[k];
+      if (fmt[k]) $('v_' + k).textContent = fmt[k](S[k]);
+      el.oninput = el.onchange = () => {
+        S[k] = el.type === 'checkbox' ? el.checked : (el.tagName === 'SELECT' ? el.value : parseFloat(el.value));
+        if (fmt[k]) $('v_' + k).textContent = fmt[k](S[k]);
+        $('debug').style.display = S.showDebug ? '' : 'none';
+        save();
+      };
+    }
+    $('debug').style.display = S.showDebug ? '' : 'none';
+  }
+  bindSettings();
+  $('settingsBtn').onclick = () => { $('settingsOverlay').hidden = false; };
+  $('closeSettings').onclick = () => { $('settingsOverlay').hidden = true; };
+  $('resetBtn').onclick = () => { const b = S.bias; S = { ...DEFAULTS, bias: b }; save(); bindSettings(); };
+
+  // ---------------- WebSocket ----------------
+  let ws = null, connected = false, lastPingTs = 0, latency = null;
+  function setStatus(state, text) { $('dot').className = state; $('statusText').textContent = text; }
+  function connect() {
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    setStatus('warn', '連線中…');
+    ws = new WebSocket(url);
+    ws.onopen = () => { connected = true; setStatus('ok', '已連線'); };
+    ws.onclose = () => { connected = false; setStatus('', '已斷線，重新連線中…'); setTimeout(connect, 1500); };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    ws.onmessage = (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.t === 'pong') { latency = Math.round(performance.now() - d.ts);
+          setStatus('ok', `已連線 · ${latency} ms${paused ? ' · 已暫停' : ''}`); }
+      } catch (e) {}
+    };
+  }
+  const send = (o) => { if (connected && ws.readyState === 1) ws.send(JSON.stringify(o)); };
+  setInterval(() => send({ t: 'ping', ts: performance.now() }), 2000);
+
+  // ---------------- 陀螺儀 → 游標 ----------------
+  let paused = false;
+  let freezeUntil = 0;        // 點擊防抖：此時間前不移動
+  let fingerDown = false;     // 有手指按著（非拖曳）時凍結
+  let dragging = false;
+  let bias = S.bias || { x: 0, y: 0 };   // 校正後的零點偏移（度/秒）
+  let sx = 0, sy = 0;         // 平滑後的角速度
+  let accX = 0, accY = 0;     // 待送出的像素
+  let lastT = 0;
+  let calib = null;           // 校正中收集的樣本
+  let lastRaw = { a: 0, b: 0, g: 0 };
+
+  function onMotion(e) {
+    const r = e.rotationRate; if (!r) return;
+    const now = performance.now();
+    let dt = lastT ? (now - lastT) / 1000 : 0.016;
+    lastT = now;
+    if (dt > 0.1) dt = 0.016;  // 背景切回來等情況
+    const a = r.alpha || 0, b = r.beta || 0, g = r.gamma || 0;
+    lastRaw = { a, b, g };
+
+    // 依握持方式取出「水平」「垂直」角速度（度/秒）
+    let rx, ry;
+    if (S.mode === 'upright') { rx = -g; ry = -b; } else { rx = -a; ry = -b; }
+
+    if (calib) { calib.push([rx, ry]); return; }
+
+    rx -= bias.x; ry -= bias.y;
+
+    // 自動漂移修正：幾乎靜止時，緩慢把零點追上
+    if (Math.hypot(rx, ry) < 1.2) { bias.x += rx * 0.005; bias.y += ry * 0.005; }
+
+    // 防抖 1：指數平滑（低通濾波），時間常數 0~120ms
+    const tau = S.smooth / 100 * 0.12;
+    const k = tau > 0 ? 1 - Math.exp(-dt / tau) : 1;
+    sx += (rx - sx) * k; sy += (ry - sy) * k;
+
+    // 防抖 2：死區（柔性，超過門檻才從 0 開始，不會跳動）
+    let mag = Math.hypot(sx, sy);
+    let vx = 0, vy = 0;
+    if (mag > S.dead) { const f = (mag - S.dead) / mag; vx = sx * f; vy = sy * f; mag -= S.dead; }
+
+    // 加速度曲線：慢 = 精準，快 = 移動遠
+    const ac = S.accel / 100;
+    const gain = Math.min(4, Math.max(0.25, Math.pow(Math.max(mag, 0.001) / 60, ac)));
+    let px = vx * dt * S.sens * gain;
+    let py = vy * dt * S.sens * gain;
+    if (S.invX) px = -px;
+    if (S.invY) py = -py;
+
+    const frozen = paused || (fingerDown && !dragging) || now < freezeUntil;
+    if (!frozen) { accX += px; accY += py; }
+
+    if (S.showDebug) {
+      $('debug').textContent =
+        `α ${a.toFixed(1)}  β ${b.toFixed(1)}  γ ${g.toFixed(1)}\n` +
+        `bias ${bias.x.toFixed(2)}, ${bias.y.toFixed(2)}\n` +
+        `v ${vx.toFixed(1)}, ${vy.toFixed(1)}  gain ${gain.toFixed(2)}${frozen ? '  [凍結]' : ''}`;
+    }
+  }
+
+  // 約 60Hz 送出累積位移
+  setInterval(() => {
+    if (Math.abs(accX) >= 0.05 || Math.abs(accY) >= 0.05) {
+      send({ t: 'm', x: +accX.toFixed(2), y: +accY.toFixed(2) });
+      accX = 0; accY = 0;
+    }
+  }, 16);
+
+  // 校正：收集 1.5 秒樣本平均作為零點
+  $('calibBtn').onclick = () => {
+    $('calibOverlay').hidden = false;
+    let n = 3; $('calibMsg').textContent = n;
+    const tick = setInterval(() => {
+      n--;
+      if (n > 0) { $('calibMsg').textContent = n; return; }
+      clearInterval(tick);
+      calib = []; $('calibMsg').textContent = '量測中…';
+      setTimeout(() => {
+        const c = calib; calib = null;
+        if (c.length > 10) {
+          bias = { x: c.reduce((s, v) => s + v[0], 0) / c.length,
+                   y: c.reduce((s, v) => s + v[1], 0) / c.length };
+          S.bias = bias; save();
+          $('calibMsg').textContent = '✅ 完成';
+        } else {
+          $('calibMsg').textContent = '⚠ 沒收到感測器資料';
+        }
+        sx = sy = accX = accY = 0;
+        setTimeout(() => { $('calibOverlay').hidden = true; }, 700);
+      }, 1500);
+    }, 700);
+  };
+
+  $('pauseBtn').onclick = () => {
+    paused = !paused;
+    $('pauseBtn').classList.toggle('on', paused);
+    $('pauseBtn').textContent = paused ? '▶ 繼續' : '⏸ 暫停';
+    $('pad').classList.toggle('paused', paused);
+    accX = accY = 0;
+  };
+
+  // ---------------- 觸控：點擊 / 長按拖曳 / 雙指捲動 ----------------
+  const pad = $('pad');
+  const TAP_MAX_MS = 350, TAP_MAX_MOVE = 18, LONG_PRESS_MS = 450, PX_PER_NOTCH = 30;
+  let touchStart = null;      // {x, y, t, side}
+  let multi = false;          // 本次手勢是否用過雙指
+  let scrollLast = null;      // 雙指中心點
+  let longTimer = null;
+
+  const vibrate = (ms) => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
+  const flash = (side) => {
+    const el = side === 'left' ? $('leftHalf') : $('rightHalf');
+    el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 120);
+  };
+  const center = (tl) => {
+    let x = 0, y = 0; for (const t of tl) { x += t.clientX; y += t.clientY; }
+    return { x: x / tl.length, y: y / tl.length };
+  };
+  const sideOf = (x) => (x < pad.getBoundingClientRect().left + pad.clientWidth / 2 ? 'left' : 'right');
+
+  pad.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    const tl = e.touches;
+    if (tl.length === 1 && !multi) {
+      const t = tl[0];
+      touchStart = { x: t.clientX, y: t.clientY, t: performance.now(), side: sideOf(t.clientX) };
+      fingerDown = true;
+      clearTimeout(longTimer);
+      if (touchStart.side === 'left') {
+        longTimer = setTimeout(() => {   // 長按左邊 → 按住左鍵，可拖曳
+          if (touchStart && !multi) {
+            dragging = true; send({ t: 'b', b: 'left', a: 'down' }); vibrate(30);
+            $('leftHalf').classList.add('flash');
+          }
+        }, LONG_PRESS_MS);
+      }
+    } else if (tl.length >= 2) {
+      multi = true; clearTimeout(longTimer);
+      scrollLast = center([tl[0], tl[1]]);
+      fingerDown = true;
+    }
+  }, { passive: false });
+
+  pad.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    const tl = e.touches;
+    if (tl.length >= 2 && scrollLast) {
+      const c = center([tl[0], tl[1]]);
+      const dx = c.x - scrollLast.x, dy = c.y - scrollLast.y;
+      scrollLast = c;
+      const inv = S.invScroll ? -1 : 1;
+      // 手指往上滑 → 內容往上走（像手機）→ 滾輪往下
+      const wy = (dy / PX_PER_NOTCH) * (S.scroll / 8) * inv;
+      const wx = (-dx / PX_PER_NOTCH) * (S.scroll / 8) * inv;
+      if (Math.abs(wy) > 0.001 || Math.abs(wx) > 0.001) send({ t: 's', y: +wy.toFixed(3), x: +wx.toFixed(3) });
+    } else if (tl.length === 1 && touchStart) {
+      const t = tl[0];
+      if (Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y) > TAP_MAX_MOVE && !dragging) {
+        clearTimeout(longTimer);
+      }
+    }
+  }, { passive: false });
+
+  function endTouch(e) {
+    e.preventDefault();
+    const tl = e.touches;
+    if (tl.length === 0) {
+      clearTimeout(longTimer);
+      if (dragging) {
+        send({ t: 'b', b: 'left', a: 'up' }); dragging = false;
+        $('leftHalf').classList.remove('flash');
+      } else if (touchStart && !multi) {
+        const t = e.changedTouches[0];
+        const moved = Math.hypot(t.clientX - touchStart.x, t.clientY - touchStart.y);
+        if (performance.now() - touchStart.t < TAP_MAX_MS && moved < TAP_MAX_MOVE) {
+          send({ t: 'c', b: touchStart.side }); flash(touchStart.side); vibrate(15);
+        }
+      }
+      touchStart = null; multi = false; scrollLast = null; fingerDown = false;
+      freezeUntil = performance.now() + S.clickFreeze;
+      accX = accY = 0;
+    } else if (tl.length === 1 && multi) {
+      scrollLast = null;   // 雙指變單指：停止捲動，等全部放開
+    }
+  }
+  pad.addEventListener('touchend', endTouch, { passive: false });
+  pad.addEventListener('touchcancel', endTouch, { passive: false });
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+  document.addEventListener('gesturestart', (e) => e.preventDefault());
+
+  // ---------------- 啟動 ----------------
+  let wakeLock = null;
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { keepAwake(); lastT = 0; }
+  });
+
+  $('startBtn').onclick = async () => {
+    $('startErr').textContent = '';
+    if (!window.isSecureContext) {
+      $('startErr').textContent = '需要 HTTPS 才能讀取陀螺儀，請用 https:// 開頭的網址。';
+      return;
+    }
+    if (typeof DeviceMotionEvent === 'undefined') {
+      $('startErr').textContent = '這個瀏覽器不支援動作感測器。';
+      return;
+    }
+    try {
+      if (typeof DeviceMotionEvent.requestPermission === 'function') {   // iOS 13+
+        const p = await DeviceMotionEvent.requestPermission();
+        if (p !== 'granted') { $('startErr').textContent = '未取得動作感測器權限。'; return; }
+      }
+    } catch (err) {
+      $('startErr').textContent = '要求感測器權限失敗：' + err; return;
+    }
+    window.addEventListener('devicemotion', onMotion);
+    keepAwake();
+    connect();
+    $('startOverlay').hidden = true;
+    // 3 秒內沒收到感測器資料就提示
+    setTimeout(() => {
+      if (!lastT) setStatus('warn', '沒有陀螺儀資料（手機不支援或權限被擋）');
+    }, 3000);
+  };
+})();
+</script>
+</body>
+</html>
