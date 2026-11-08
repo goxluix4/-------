@@ -203,20 +203,30 @@ def get_lan_ips() -> list[str]:
     return ips or ["127.0.0.1"]
 
 
-def ensure_certificate(ips: list[str]) -> None:
+def get_mdns_name() -> str | None:
+    """電腦名稱.local（Windows 10/11、iPhone、多數新 Android 都支援），IP 變了也能用。"""
+    name = socket.gethostname().split(".")[0].strip().lower()
+    if name and all(c.isalnum() or c == "-" for c in name) and name.isascii():
+        return f"{name}.local"
+    return None
+
+
+def ensure_certificate(ips: list[str], dns_names: list[str]) -> None:
     """產生（或重新產生）自簽憑證，SAN 內含目前所有區網 IP。"""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
     from cryptography.x509.oid import NameOID
 
-    wanted = set(ips) | {"127.0.0.1"}
+    wanted = set(ips) | {"127.0.0.1"} | set(dns_names)
+    wanted_ips = set(ips) | {"127.0.0.1"}
 
     if CERT_FILE.exists() and KEY_FILE.exists():
         try:
             cert = x509.load_pem_x509_certificate(CERT_FILE.read_bytes())
             san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
             have = {str(ip) for ip in san.get_values_for_type(x509.IPAddress)}
+            have |= set(san.get_values_for_type(x509.DNSName))
             not_expired = cert.not_valid_after_utc > datetime.datetime.now(datetime.timezone.utc)
             if wanted <= have and not_expired:
                 return
@@ -229,7 +239,8 @@ def ensure_certificate(ips: list[str]) -> None:
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Air Mouse (self-signed)")])
     now = datetime.datetime.now(datetime.timezone.utc)
     alt_names: list[x509.GeneralName] = [x509.DNSName("localhost")]
-    alt_names += [x509.IPAddress(ipaddress.ip_address(ip)) for ip in sorted(wanted)]
+    alt_names += [x509.DNSName(n) for n in dns_names]
+    alt_names += [x509.IPAddress(ipaddress.ip_address(ip)) for ip in sorted(wanted_ips)]
     cert = (
         x509.CertificateBuilder()
         .subject_name(name)
@@ -349,7 +360,8 @@ def main() -> None:
             pass
 
     ips = get_lan_ips()
-    ensure_certificate(ips)
+    mdns = get_mdns_name()
+    ensure_certificate(ips, [mdns] if mdns else [])
     ssl_ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_ctx.load_cert_chain(CERT_FILE, KEY_FILE)
 
@@ -363,6 +375,8 @@ def main() -> None:
     print(" 請讓手機連上「同一個 Wi-Fi」，用瀏覽器開啟：")
     for ip in ips:
         print(f"   👉 https://{ip}:{args.port}")
+    if mdns:
+        print(f"   👉 https://{mdns}:{args.port}   ← 用電腦名稱，IP 變了也能用（部分 Android 不支援）")
     print(" 第一次會出現「憑證不安全」警告：")
     print("   Android Chrome：進階 → 繼續前往")
     print("   iPhone Safari ：顯示詳細資訊 → 造訪此網站")
@@ -370,10 +384,25 @@ def main() -> None:
     print("=" * 56)
     print_qr(url)
 
+    # 把網址存成文字檔（背景自動啟動時看不到視窗，可以開這個檔案查）
+    try:
+        lines = [f"https://{ip}:{args.port}" for ip in ips]
+        if mdns:
+            lines.append(f"https://{mdns}:{args.port}")
+        (BASE_DIR / "目前網址.txt").write_text(
+            "手機用瀏覽器開以下任一網址：\n" + "\n".join(lines) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        pass
+
     try:
         web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_ctx, print=None)
     except KeyboardInterrupt:
         pass
+    except OSError as e:
+        print(f"\n❌ 無法使用埠 {args.port}：{e}")
+        print("   可能空中滑鼠已經在背景執行（開機自動啟動），手機直接開網址即可；")
+        print("   或改用其他埠：python server.py --port 9443")
 
 
 if __name__ == "__main__":

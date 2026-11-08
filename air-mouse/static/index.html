@@ -6,6 +6,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#111418">
+<meta name="apple-mobile-web-app-title" content="空中滑鼠">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<link rel="manifest" href="/static/manifest.json">
+<link rel="icon" href="/static/icon-192.png">
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
 <title>空中滑鼠</title>
 <style>
   :root {
@@ -82,6 +87,12 @@
     <p>游標會飄的話，把手機放在桌上按「🎯 校正」。</p>
     <button class="big" id="startBtn">開始</button>
     <p id="startErr" style="color:var(--err)"></p>
+    <div id="a2hs">
+      <p style="margin-top:16px"><b>📌 加到手機桌面，下次一鍵開啟：</b></p>
+      <button class="big secondary" id="installBtn" hidden>加到主畫面</button>
+      <p id="a2hsAndroid">Android Chrome：右上角 <b>⋮</b> →「<b>加到主畫面</b>」（或「安裝應用程式」）</p>
+      <p id="a2hsIos">iPhone Safari：下方 <b>分享鈕 ⬆</b> →「<b>加入主畫面</b>」</p>
+    </div>
   </div>
 </div>
 
@@ -402,7 +413,24 @@
     if (document.visibilityState === 'visible') { keepAwake(); lastT = 0; }
   });
 
-  $('startBtn').onclick = async () => {
+  // 從桌面圖示開啟時隱藏「加到主畫面」說明
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (standalone) $('a2hs').hidden = true;
+  else $(isIOS ? 'a2hsAndroid' : 'a2hsIos').hidden = true;
+  let installEvt = null;
+  window.addEventListener('beforeinstallprompt', (e) => {   // Chrome 若支援，直接顯示安裝按鈕
+    e.preventDefault(); installEvt = e; $('installBtn').hidden = false;
+  });
+  $('installBtn').onclick = async () => {
+    if (!installEvt) return;
+    installEvt.prompt(); installEvt = null; $('installBtn').hidden = true;
+  };
+
+  let started = false;
+  async function start(auto) {
+    if (started) return;
     $('startErr').textContent = '';
     if (!window.isSecureContext) {
       $('startErr').textContent = '需要 HTTPS 才能讀取陀螺儀，請用 https:// 開頭的網址。';
@@ -413,13 +441,19 @@
       return;
     }
     try {
-      if (typeof DeviceMotionEvent.requestPermission === 'function') {   // iOS 13+
+      if (typeof DeviceMotionEvent.requestPermission === 'function') {   // iOS 13+（需要使用者點擊）
         const p = await DeviceMotionEvent.requestPermission();
-        if (p !== 'granted') { $('startErr').textContent = '未取得動作感測器權限。'; return; }
+        if (p !== 'granted') {
+          if (!auto) $('startErr').textContent = '未取得動作感測器權限。';
+          return;
+        }
       }
     } catch (err) {
-      $('startErr').textContent = '要求感測器權限失敗：' + err; return;
+      if (!auto) $('startErr').textContent = '要求感測器權限失敗：' + err;
+      return;   // 自動啟動失敗（iPhone 需要點一下）→ 保留開始畫面
     }
+    started = true;
+    try { localStorage.setItem('airmouse.autostart', '1'); } catch (e) {}
     window.addEventListener('devicemotion', onMotion);
     keepAwake();
     connect();
@@ -428,7 +462,16 @@
     setTimeout(() => {
       if (!lastT) setStatus('warn', '沒有陀螺儀資料（手機不支援或權限被擋）');
     }, 3000);
-  };
+  }
+  $('startBtn').onclick = () => start(false);
+
+  // 用過一次之後：打開頁面就自動連線（Android 可直接開始；iPhone 系統規定要點一下「開始」）
+  let wantAuto = false;
+  try { wantAuto = localStorage.getItem('airmouse.autostart') === '1'; } catch (e) {}
+  if (wantAuto || standalone) {
+    if (isIOS) $('startBtn').textContent = '點一下開始';
+    else start(true);
+  }
 })();
 </script>
 </body>
