@@ -59,6 +59,14 @@
   .btns { display: flex; gap: 8px; }
   .btns button { flex: 1; }
   .secondary { background: #262d36 !important; border: 1px solid var(--line) !important; }
+  .pc { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin: 8px 0; padding: 14px;
+    border-radius: 12px; border: 1px solid var(--line); background: #262d36; color: var(--text); font-size: 17px; }
+  .pc:active { background: var(--accent); }
+  .pc .ico { font-size: 26px; }
+  .pc .meta { flex: 1; min-width: 0; }
+  .pc .meta div:last-child { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .pc .tag { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: var(--accent); color: #fff; }
+  .pc.busy { opacity: .6; }
   #calibMsg { font-size: 28px; text-align: center; }
 </style>
 </head>
@@ -66,6 +74,7 @@
 <div id="app">
   <header>
     <div id="status"><span id="dot"></span><span id="statusText">未連線</span></div>
+    <button id="switchBtn">💻</button>
     <button id="pauseBtn">⏸ 暫停</button>
     <button id="calibBtn">🎯 校正</button>
     <button id="settingsBtn">⚙</button>
@@ -81,12 +90,16 @@
 <!-- 開始畫面 -->
 <div class="overlay" id="startOverlay">
   <div class="card">
-    <h2>📱 手機空中滑鼠</h2>
-    <p>把手機<b>螢幕朝上平放在手上</b>、上緣指向電腦螢幕，左右轉動 = 游標左右，上下翹 = 游標上下。</p>
-    <p>點左半邊 = 左鍵、右半邊 = 右鍵、雙指滑動 = 捲動。左半邊長按可拖曳。</p>
-    <p>游標會飄的話，把手機放在桌上按「🎯 校正」。</p>
-    <button class="big" id="startBtn">開始</button>
+    <h2>💻 選擇要控制的電腦</h2>
+    <div id="pcList"><p>尋找電腦中…</p></div>
     <p id="startErr" style="color:var(--err)"></p>
+    <p style="font-size:12px">其他電腦沒出現？確認它也有執行空中滑鼠、連同一個 Wi-Fi，並在防火牆允許 Python。</p>
+    <details>
+      <summary style="color:var(--muted);font-size:14px">使用說明</summary>
+      <p>手機<b>螢幕朝上</b>拿著、上緣指向電腦：左右轉 = 游標左右，上下翹 = 游標上下。</p>
+      <p>點左半邊 = 左鍵、右半邊 = 右鍵、雙指滑動 = 捲動、長按左半邊 = 拖曳。</p>
+      <p>游標會飄：把手機放桌上按「🎯 校正」。</p>
+    </details>
     <div id="a2hs">
       <p style="margin-top:16px"><b>📌 加到手機桌面，下次一鍵開啟：</b></p>
       <button class="big secondary" id="installBtn" hidden>加到主畫面</button>
@@ -193,21 +206,37 @@
   $('resetBtn').onclick = () => { const b = S.bias; S = { ...DEFAULTS, bias: b }; save(); bindSettings(); };
 
   // ---------------- WebSocket ----------------
-  let ws = null, connected = false, lastPingTs = 0, latency = null;
+  let ws = null, connected = false, latency = null;
+  let targetId = null, targetName = '';   // 目前控制的電腦
   function setStatus(state, text) { $('dot').className = state; $('statusText').textContent = text; }
+  const statusLine = () => `${targetName || '已連線'}${latency != null ? ' · ' + latency + ' ms' : ''}${paused ? ' · 已暫停' : ''}`;
   function connect() {
+    if (ws && ws.readyState <= 1) return;
     const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     setStatus('warn', '連線中…');
     ws = new WebSocket(url);
-    ws.onopen = () => { connected = true; setStatus('ok', '已連線'); };
+    ws.onopen = () => {
+      connected = true;
+      if (targetId) ws.send(JSON.stringify({ t: 'sel', id: targetId }));   // 重新連線後繼續控制同一台
+    };
     ws.onclose = () => { connected = false; setStatus('', '已斷線，重新連線中…'); setTimeout(connect, 1500); };
     ws.onerror = () => { try { ws.close(); } catch (e) {} };
     ws.onmessage = (ev) => {
-      try {
-        const d = JSON.parse(ev.data);
-        if (d.t === 'pong') { latency = Math.round(performance.now() - d.ts);
-          setStatus('ok', `已連線 · ${latency} ms${paused ? ' · 已暫停' : ''}`); }
-      } catch (e) {}
+      let d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      if (d.t === 'pong') {
+        latency = Math.round(performance.now() - d.ts);
+        if (targetName) setStatus('ok', statusLine());
+      } else if (d.t === 'sel') {
+        document.querySelectorAll('.pc.busy').forEach(el => el.classList.remove('busy'));
+        if (d.ok) {
+          targetName = d.name; setStatus('ok', statusLine());
+          $('startOverlay').hidden = true; $('startErr').textContent = '';
+        } else {
+          targetName = ''; setStatus('warn', '請選擇電腦');
+          $('startErr').textContent = d.err || '連線失敗';
+          $('startOverlay').hidden = false; refreshList();
+        }
+      }
     };
   }
   const send = (o) => { if (connected && ws.readyState === 1) ws.send(JSON.stringify(o)); };
@@ -428,50 +457,67 @@
     installEvt.prompt(); installEvt = null; $('installBtn').hidden = true;
   };
 
-  let started = false;
-  async function start(auto) {
-    if (started) return;
-    $('startErr').textContent = '';
-    if (!window.isSecureContext) {
-      $('startErr').textContent = '需要 HTTPS 才能讀取陀螺儀，請用 https:// 開頭的網址。';
-      return;
-    }
-    if (typeof DeviceMotionEvent === 'undefined') {
-      $('startErr').textContent = '這個瀏覽器不支援動作感測器。';
-      return;
-    }
+  // ---------------- 電腦清單：點一下就連線 ----------------
+  let sensorsOn = false;
+  let lastUsed = null;
+  try { lastUsed = localStorage.getItem('airmouse.lastPc'); } catch (e) {}
+  const esc = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  async function enableSensors() {
+    if (sensorsOn) return true;
+    if (!window.isSecureContext) { $('startErr').textContent = '需要 HTTPS 才能讀取陀螺儀，請用 https:// 開頭的網址。'; return false; }
+    if (typeof DeviceMotionEvent === 'undefined') { $('startErr').textContent = '這個瀏覽器不支援動作感測器。'; return false; }
     try {
-      if (typeof DeviceMotionEvent.requestPermission === 'function') {   // iOS 13+（需要使用者點擊）
+      // iPhone 規定必須在「點擊」當下要求權限 —— 點電腦名稱的這一下就算數
+      if (typeof DeviceMotionEvent.requestPermission === 'function') {
         const p = await DeviceMotionEvent.requestPermission();
-        if (p !== 'granted') {
-          if (!auto) $('startErr').textContent = '未取得動作感測器權限。';
-          return;
-        }
+        if (p !== 'granted') { $('startErr').textContent = '未取得動作感測器權限，請關掉頁面重開後按「允許」。'; return false; }
       }
-    } catch (err) {
-      if (!auto) $('startErr').textContent = '要求感測器權限失敗：' + err;
-      return;   // 自動啟動失敗（iPhone 需要點一下）→ 保留開始畫面
-    }
-    started = true;
-    try { localStorage.setItem('airmouse.autostart', '1'); } catch (e) {}
+    } catch (err) { $('startErr').textContent = '要求感測器權限失敗：' + err; return false; }
+    sensorsOn = true;
     window.addEventListener('devicemotion', onMotion);
     keepAwake();
-    connect();
-    $('startOverlay').hidden = true;
-    // 3 秒內沒收到感測器資料就提示
-    setTimeout(() => {
-      if (!lastT) setStatus('warn', '沒有陀螺儀資料（手機不支援或權限被擋）');
-    }, 3000);
+    setTimeout(() => { if (!lastT) setStatus('warn', '沒有陀螺儀資料（手機不支援或權限被擋）'); }, 3000);
+    return true;
   }
-  $('startBtn').onclick = () => start(false);
 
-  // 用過一次之後：打開頁面就自動連線（Android 可直接開始；iPhone 系統規定要點一下「開始」）
-  let wantAuto = false;
-  try { wantAuto = localStorage.getItem('airmouse.autostart') === '1'; } catch (e) {}
-  if (wantAuto || standalone) {
-    if (isIOS) $('startBtn').textContent = '點一下開始';
-    else start(true);
+  async function choose(pc, btn) {
+    $('startErr').textContent = '';
+    if (!(await enableSensors())) return;
+    btn.classList.add('busy');
+    targetId = pc.id; targetName = '';
+    try { localStorage.setItem('airmouse.lastPc', pc.id); } catch (e) {} lastUsed = pc.id;
+    setStatus('warn', `連線到 ${pc.name}…`);
+    if (connected) ws.send(JSON.stringify({ t: 'sel', id: pc.id }));
+    else connect();   // 連上後 onopen 會自動送出選擇
   }
+
+  let listTimer = null;
+  async function refreshList() {
+    if ($('startOverlay').hidden) return;
+    let list;
+    try { list = await (await fetch('/api/computers', { cache: 'no-store' })).json(); }
+    catch (e) { $('pcList').innerHTML = '<p>連不到主電腦，請確認它有開機並執行空中滑鼠。</p>'; return; }
+    if (document.querySelector('.pc.busy')) return;   // 連線中不要重畫
+    $('pcList').innerHTML = '';
+    for (const pc of list) {
+      const b = document.createElement('button');
+      b.className = 'pc';
+      b.innerHTML = `<span class="ico">🖥️</span><span class="meta"><div>${esc(pc.name)}</div>` +
+        `<div>${pc.self ? '這台（主電腦）' : esc(pc.ip)}</div></span>` +
+        (pc.id === lastUsed ? '<span class="tag">上次使用</span>' : '');
+      b.onclick = () => choose(pc, b);
+      $('pcList').appendChild(b);
+    }
+  }
+  function showList() {
+    $('startOverlay').hidden = false; refreshList();
+    clearInterval(listTimer); listTimer = setInterval(refreshList, 2000);
+  }
+  $('switchBtn').onclick = showList;
+  const _hide = () => { if ($('startOverlay').hidden) clearInterval(listTimer); };
+  new MutationObserver(_hide).observe($('startOverlay'), { attributes: true });
+  showList();
 })();
 </script>
 </body>

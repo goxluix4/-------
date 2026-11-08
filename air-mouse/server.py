@@ -280,24 +280,152 @@ def print_qr(url: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 自動尋找區網內其他電腦（UDP 廣播）
+# ---------------------------------------------------------------------------
+DISCOVERY_PORT = 8442
+PEER_TIMEOUT = 8.0  # 秒；超過沒收到廣播就視為離線
+
+
+class Discovery(asyncio.DatagramProtocol):
+    """每台電腦定時廣播「我在這裡」，同時收集其他電腦的廣播。"""
+
+    def __init__(self, my_id: str, name: str, port: int) -> None:
+        self.my_id, self.name, self.port = my_id, name, port
+        self.peers: dict[str, dict] = {}
+        self.transport: asyncio.DatagramTransport | None = None
+
+    def connection_made(self, transport) -> None:  # type: ignore[override]
+        self.transport = transport
+
+    def datagram_received(self, data: bytes, addr) -> None:  # type: ignore[override]
+        try:
+            msg = json.loads(data.decode("utf-8"))
+        except ValueError:
+            return
+        if msg.get("app") != "airmouse" or msg.get("id") == self.my_id:
+            return
+        try:
+            port = int(msg.get("port", 8443))
+        except (TypeError, ValueError):
+            return
+        self.peers[str(msg["id"])] = {
+            "id": str(msg["id"]),
+            "name": str(msg.get("name", addr[0]))[:40],
+            "ip": addr[0],
+            "port": port,
+            "seen": asyncio.get_running_loop().time(),
+        }
+
+    def online_peers(self) -> list[dict]:
+        now = asyncio.get_running_loop().time()
+        return [p for p in self.peers.values() if now - p["seen"] < PEER_TIMEOUT]
+
+    async def announce_forever(self) -> None:
+        payload = json.dumps(
+            {"app": "airmouse", "v": 1, "id": self.my_id, "name": self.name, "port": self.port}
+        ).encode("utf-8")
+        while True:
+            targets = {"255.255.255.255"}
+            for ip in get_lan_ips():  # 也送子網路廣播，多網卡時比較可靠
+                parts = ip.split(".")
+                if len(parts) == 4 and ip != "127.0.0.1":
+                    targets.add(".".join(parts[:3] + ["255"]))
+            for t in targets:
+                try:
+                    if self.transport:
+                        self.transport.sendto(payload, (t, DISCOVERY_PORT))
+                except OSError:
+                    pass
+            await asyncio.sleep(2)
+
+
+async def start_discovery(app: web.Application) -> None:
+    disc: Discovery = app["discovery"]
+    loop = asyncio.get_running_loop()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    try:
+        sock.bind(("", DISCOVERY_PORT))
+    except OSError as e:
+        print(f"⚠ 無法啟用自動尋找電腦（UDP {DISCOVERY_PORT}）：{e}")
+        sock.close()
+        return
+    await loop.create_datagram_endpoint(lambda: disc, sock=sock)
+    app["announce_task"] = asyncio.create_task(disc.announce_forever())
+
+
+async def stop_discovery(app: web.Application) -> None:
+    task = app.get("announce_task")
+    if task:
+        task.cancel()
+    if app["discovery"].transport:
+        app["discovery"].transport.close()
+    await app["http"].close()
+
+
+# ---------------------------------------------------------------------------
 # Web 應用
 # ---------------------------------------------------------------------------
-def build_app(mouse: MouseBase) -> web.Application:
+def build_app(mouse: MouseBase, my_id: str, name: str, port: int) -> web.Application:
     app = web.Application()
+    app["discovery"] = Discovery(my_id, name, port)
     clients: set[web.WebSocketResponse] = set()
+
+    async def make_session(app_: web.Application) -> None:
+        import aiohttp
+
+        app_["http"] = aiohttp.ClientSession()
+
+    app.on_startup.append(make_session)
+    app.on_startup.append(start_discovery)
+    app.on_cleanup.append(stop_discovery)
 
     async def index(_request: web.Request) -> web.FileResponse:
         resp = web.FileResponse(STATIC_DIR / "index.html")
         resp.headers["Cache-Control"] = "no-store"
         return resp
 
+    async def computers(_request: web.Request) -> web.Response:
+        items = [{"id": my_id, "name": name, "ip": "本機", "self": True}]
+        for p in sorted(app["discovery"].online_peers(), key=lambda p: p["name"].lower()):
+            items.append({"id": p["id"], "name": p["name"], "ip": p["ip"], "self": False})
+        return web.json_response(items, headers={"Cache-Control": "no-store"})
+
+    def handle_local(data: dict, held: set[str]) -> None:
+        t = data.get("t")
+        if t == "m":
+            dx, dy = float(data.get("x", 0)), float(data.get("y", 0))
+            # 防呆：限制單一封包最大位移
+            mouse.move(max(-500, min(500, dx)), max(-500, min(500, dy)))
+        elif t == "c":
+            mouse.click(str(data.get("b", "left")))
+        elif t == "b":
+            b, a = str(data.get("b", "left")), str(data.get("a", "up"))
+            mouse.button(b, a)
+            (held.add if a == "down" else held.discard)(b)
+        elif t == "s":
+            mouse.scroll(
+                max(-50, min(50, float(data.get("y", 0)))),
+                max(-50, min(50, float(data.get("x", 0)))),
+            )
+
     async def ws_handler(request: web.Request) -> web.WebSocketResponse:
         ws = web.WebSocketResponse(heartbeat=10, max_msg_size=64 * 1024)
         await ws.prepare(request)
         clients.add(ws)
         held: set[str] = set()
-        peer = request.remote
-        print(f"📱 手機已連線：{peer}（目前 {len(clients)} 台）")
+        peer_ws = None          # 轉送到其他電腦時的連線
+        target = my_id          # 目前控制哪台電腦
+        who = request.remote
+        print(f"📱 手機已連線：{who}（目前 {len(clients)} 台）")
+
+        async def close_peer() -> None:
+            nonlocal peer_ws
+            if peer_ws is not None and not peer_ws.closed:
+                await peer_ws.close()
+            peer_ws = None
+
         try:
             async for msg in ws:
                 if msg.type != WSMsgType.TEXT:
@@ -307,39 +435,71 @@ def build_app(mouse: MouseBase) -> web.Application:
                 except ValueError:
                     continue
                 t = data.get("t")
-                try:
-                    if t == "m":
-                        dx, dy = float(data.get("x", 0)), float(data.get("y", 0))
-                        # 防呆：限制單一封包最大位移
-                        mouse.move(max(-500, min(500, dx)), max(-500, min(500, dy)))
-                    elif t == "c":
-                        mouse.click(str(data.get("b", "left")))
-                    elif t == "b":
-                        b, a = str(data.get("b", "left")), str(data.get("a", "up"))
-                        mouse.button(b, a)
-                        (held.add if a == "down" else held.discard)(b)
-                    elif t == "s":
-                        mouse.scroll(
-                            max(-50, min(50, float(data.get("y", 0)))),
-                            max(-50, min(50, float(data.get("x", 0)))),
-                        )
-                    elif t == "ping":
-                        await ws.send_str(json.dumps({"t": "pong", "ts": data.get("ts")}))
-                except (TypeError, ValueError):
+                if t == "ping":
+                    await ws.send_str(json.dumps({"t": "pong", "ts": data.get("ts")}))
                     continue
+                if t == "sel":  # 手機選擇要控制的電腦
+                    await close_peer()
+                    for b in list(held):
+                        mouse.button(b, "up")
+                    held.clear()
+                    want = str(data.get("id", my_id))
+                    if want == my_id:
+                        target = my_id
+                        await ws.send_str(json.dumps({"t": "sel", "ok": True, "name": name}))
+                        print(f"🖱 {who} 控制：本機")
+                        continue
+                    p = app["discovery"].peers.get(want)
+                    if not p:
+                        await ws.send_str(json.dumps({"t": "sel", "ok": False, "err": "找不到這台電腦"}))
+                        continue
+                    try:
+                        # 電腦之間用自簽憑證，不驗證（只在區網內）
+                        peer_ws = await asyncio.wait_for(
+                            app["http"].ws_connect(
+                                f"wss://{p['ip']}:{p['port']}/ws", ssl=False, heartbeat=10
+                            ),
+                            timeout=5,
+                        )
+                        target = want
+                        await ws.send_str(json.dumps({"t": "sel", "ok": True, "name": p["name"]}))
+                        print(f"🖱 {who} 控制：{p['name']} ({p['ip']})，由本機轉送")
+                    except Exception as e:  # noqa: BLE001
+                        target = my_id
+                        await ws.send_str(
+                            json.dumps({"t": "sel", "ok": False, "err": f"連不到 {p['name']}：{e}"})
+                        )
+                    continue
+
+                if target == my_id:
+                    try:
+                        handle_local(data, held)
+                    except (TypeError, ValueError):
+                        continue
+                elif peer_ws is not None and not peer_ws.closed:
+                    try:
+                        await peer_ws.send_str(msg.data)
+                    except Exception:  # noqa: BLE001
+                        await close_peer()
+                        await ws.send_str(json.dumps({"t": "sel", "ok": False, "err": "和那台電腦的連線中斷了"}))
+                else:
+                    await ws.send_str(json.dumps({"t": "sel", "ok": False, "err": "和那台電腦的連線中斷了"}))
+                    target = my_id
         finally:
             clients.discard(ws)
+            await close_peer()
             # 斷線時放開可能還按著的按鍵，避免卡住
             for b in list(held):
                 try:
                     mouse.button(b, "up")
                 except Exception:  # noqa: BLE001
                     pass
-            print(f"📴 手機已斷線：{peer}（剩 {len(clients)} 台）")
+            print(f"📴 手機已斷線：{who}（剩 {len(clients)} 台）")
         return ws
 
     app.router.add_get("/", index)
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/api/computers", computers)
     app.router.add_static("/static", STATIC_DIR)
     return app
 
@@ -349,6 +509,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--dry-run", action="store_true", help="不控制滑鼠，只印出指令")
+    parser.add_argument("--name", default=None, help="在手機清單上顯示的電腦名稱（預設為電腦名稱）")
     args = parser.parse_args()
 
     if sys.platform == "win32":
@@ -366,12 +527,14 @@ def main() -> None:
     ssl_ctx.load_cert_chain(CERT_FILE, KEY_FILE)
 
     mouse = create_mouse(args.dry_run)
-    app = build_app(mouse)
+    name = (args.name or socket.gethostname().split(".")[0] or "電腦")[:40]
+    my_id = f"{socket.gethostname()}:{args.port}"
+    app = build_app(mouse, my_id, name, args.port)
 
     url = f"https://{ips[0]}:{args.port}"
     print("=" * 56)
     print(" 手機空中滑鼠 已啟動")
-    print(f" 滑鼠後端：{type(mouse).__name__}")
+    print(f" 電腦名稱：{name}　滑鼠後端：{type(mouse).__name__}")
     print(" 請讓手機連上「同一個 Wi-Fi」，用瀏覽器開啟：")
     for ip in ips:
         print(f"   👉 https://{ip}:{args.port}")
