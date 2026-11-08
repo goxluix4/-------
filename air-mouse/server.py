@@ -365,6 +365,65 @@ async def stop_discovery(app: web.Application) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Bonjour / mDNS 廣播（iPhone App 用來自動找到電腦）
+# ---------------------------------------------------------------------------
+BONJOUR_TYPE = "_airmouse._tcp.local."
+
+
+def cert_fingerprint() -> str:
+    """憑證的 SHA-256 指紋；App 用它確認連到的是這台電腦，不需要信任憑證。"""
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+
+    cert = x509.load_pem_x509_certificate(CERT_FILE.read_bytes())
+    return cert.fingerprint(hashes.SHA256()).hex()
+
+
+def bonjour_name(name: str) -> str:
+    raw = name.encode("utf-8")[:60]
+    return raw.decode("utf-8", errors="ignore").replace(".", "-") or "AirMouse"
+
+
+async def start_bonjour(app: web.Application) -> None:
+    try:
+        from zeroconf import IPVersion, ServiceInfo
+        from zeroconf.asyncio import AsyncZeroconf
+    except ImportError:
+        print("⚠ 未安裝 zeroconf，iPhone App 將無法自動找到這台電腦（pip install zeroconf）")
+        return
+    try:
+        ips = [ip for ip in get_lan_ips() if ip != "127.0.0.1"]
+        info = ServiceInfo(
+            BONJOUR_TYPE,
+            f"{bonjour_name(app['pc_name'])}.{BONJOUR_TYPE}",
+            addresses=[socket.inet_aton(ip) for ip in ips],
+            port=app["pc_port"],
+            properties={
+                "v": "1",
+                "fp": cert_fingerprint(),
+                "id": app["pc_id"],
+                "ip": ",".join(ips),
+                "port": str(app["pc_port"]),
+            },
+            server=f"{socket.gethostname().split('.')[0]}.local.",
+        )
+        azc = AsyncZeroconf(ip_version=IPVersion.V4Only)
+        await azc.async_register_service(info, allow_name_change=True)
+        app["bonjour"] = (azc, info)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ Bonjour 廣播啟動失敗（iPhone App 可能找不到這台電腦）：{e}")
+
+
+async def stop_bonjour(app: web.Application) -> None:
+    if "bonjour" in app:
+        azc, info = app["bonjour"]
+        try:
+            await azc.async_unregister_service(info)
+        finally:
+            await azc.async_close()
+
+
+# ---------------------------------------------------------------------------
 # Web 應用
 # ---------------------------------------------------------------------------
 def build_app(mouse: MouseBase, my_id: str, name: str, port: int) -> web.Application:
@@ -378,10 +437,15 @@ def build_app(mouse: MouseBase, my_id: str, name: str, port: int) -> web.Applica
         app_["http"] = aiohttp.ClientSession()
 
     app.on_startup.append(make_session)
+    app["pc_id"], app["pc_name"], app["pc_port"] = my_id, name, port
     app.on_startup.append(start_discovery)
+    app.on_startup.append(start_bonjour)
+    app.on_cleanup.append(stop_bonjour)
     app.on_cleanup.append(stop_discovery)
 
-    async def index(_request: web.Request) -> web.FileResponse:
+    async def index(request: web.Request) -> web.StreamResponse:
+        if request.headers.get("Upgrade", "").lower() == "websocket":
+            return await ws_handler(request)
         resp = web.FileResponse(STATIC_DIR / "index.html")
         resp.headers["Cache-Control"] = "no-store"
         return resp

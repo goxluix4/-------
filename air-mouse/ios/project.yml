@@ -1,0 +1,35 @@
+# XcodeGen 專案設定（GitHub Actions 會用它產生 AirMouse.xcodeproj）
+name: AirMouse
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+targets:
+  AirMouse:
+    type: application
+    platform: iOS
+    sources: [AirMouse]
+    scheme: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.airmouse
+        TARGETED_DEVICE_FAMILY: "1"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: AirMouse/Info.plist
+      properties:
+        CFBundleDisplayName: 空中滑鼠
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        NSLocalNetworkUsageDescription: 用來尋找並連線到同一個 Wi-Fi 裡執行空中滑鼠的電腦。
+        NSBonjourServices: [_airmouse._tcp]
+        NSMotionUsageDescription: 用陀螺儀偵測手機轉動來移動電腦游標。
+        ITSAppUsesNonExemptEncryption: false
